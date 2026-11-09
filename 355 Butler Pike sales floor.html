@@ -1,0 +1,768 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Sales floor concept, 355 Butler Pike, Chalfont</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Josefin+Sans:wght@300;400;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --panel: rgba(18, 14, 24, 0.82);
+  --ink: #f3f0ea;
+  --muted: #b9b2c4;
+  --accent: #46a051;
+  --line: rgba(255,255,255,0.14);
+  --bg: #d9dbd8;
+  color-scheme: light;
+  box-sizing: border-box;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --bg: #1b1a1f; color-scheme: dark; }
+}
+:root[data-theme="dark"] { --bg: #1b1a1f; color-scheme: dark; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--bg); overflow: hidden; font-family: "Josefin Sans", "Avenir Next", "Segoe UI", sans-serif; color: var(--ink); }
+#stage { position: fixed; inset: 0; }
+canvas { display: block; }
+.panel {
+  position: fixed; left: 16px; bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  background: var(--panel); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px 12px; max-width: calc(100vw - 32px);
+}
+.panel h1 { margin: 0 0 2px; font-weight: 400; font-size: 1.05rem; letter-spacing: 0.02em; }
+.panel p { margin: 0 0 10px; font-size: 0.8rem; color: var(--muted); font-weight: 300; }
+.views { display: flex; flex-wrap: wrap; gap: 6px; }
+.views button {
+  font: inherit; font-size: 0.85rem; color: var(--ink); background: transparent;
+  border: 1px solid var(--line); border-radius: 999px; padding: 6px 12px 4px; cursor: pointer;
+}
+.views button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+.views button:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+.hint { margin-top: 8px; font-size: 0.72rem; color: var(--muted); font-weight: 300; }
+#loading { position: fixed; inset: 0; display: grid; place-items: center; font-size: 1rem; color: var(--muted); }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<div id="loading">Building the sales floor…</div>
+<div class="panel" role="region" aria-label="Camera views">
+  <h1>Sales floor, 355 Butler Pike</h1>
+  <p>±1,135 SF · finishes matched to Paper &amp; Leaf</p>
+  <div class="views" id="views">
+    <button data-view="entrance" aria-pressed="true">Entrance</button>
+    <button data-view="counter">Counter</button>
+    <button data-view="back">From the back</button>
+    <button data-view="dollhouse">Overhead</button>
+  </div>
+  <div class="hint">Drag to look around · scroll or pinch to zoom · right-drag to move</div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.147.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/environments/RoomEnvironment.js"></script>
+<script>
+(async function () {
+  try { await Promise.race([document.fonts.load('300 100px "Josefin Sans"'), new Promise(r => setTimeout(r, 1500))]); } catch (e) {}
+
+  // ---------- Units: feet. x = left→right facing the back wall, z = front (0) → new wall (48.75)
+  const H = 9.83;            // ceiling 9'-10"
+  const DEPTH = 55;          // front glass to the new wall
+  const W = 21;
+  const poly = [[0, DEPTH], [0, 0], [W, 0], [W, DEPTH]];
+
+  // ---------- Renderer / scene
+  const stage = document.getElementById('stage');
+  const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.outputEncoding = THREE.sRGBEncoding;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 0.9;
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  stage.appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0xdfe6ea);
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  scene.environment = pmrem.fromScene(new THREE.RoomEnvironment(), 0.04).texture;
+
+  const camera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 0.1, 400);
+  const controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+
+  // ---------- Seeded random so the layout is the same every load
+  let seed = 7;
+  const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const pick = a => a[Math.floor(rnd() * a.length)];
+
+  // ---------- Procedural textures
+  function canvasTex(w, h, draw, repeatX = 1, repeatY = 1, srgb = true) {
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    const g = c.getContext('2d'); draw(g, w, h);
+    const t = new THREE.CanvasTexture(c);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.repeat.set(repeatX, repeatY);
+    t.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    if (srgb) t.encoding = THREE.sRGBEncoding;
+    return t;
+  }
+  const shade = (hex, f) => {
+    const c = new THREE.Color(hex); c.offsetHSL(0, 0, f); return '#' + c.getHexString();
+  };
+
+  // Gray washed oak LVP: planks run front-to-back like the photo. Canvas = 7 ft x 14 ft.
+  function drawFloor(g, w, h) {
+    const cols = 12, pw = w / cols;
+    const tones = ['#7a7369', '#878076', '#6a645c', '#8f887d', '#746e66', '#80796e', '#5f5a53'];
+    for (let i = 0; i < cols; i++) {
+      let y = -rnd() * h * 0.3;
+      while (y < h) {
+        const len = h * (0.22 + rnd() * 0.14);
+        const base = pick(tones);
+        g.fillStyle = base; g.fillRect(i * pw, y, pw, len);
+        for (let s = 0; s < 46; s++) {            // grain streaks
+          const x = i * pw + rnd() * pw;
+          g.strokeStyle = rnd() < 0.5 ? 'rgba(60,55,50,' + (0.05 + rnd() * 0.12) + ')' : 'rgba(230,226,218,' + (0.04 + rnd() * 0.08) + ')';
+          g.lineWidth = 0.6 + rnd() * 2.2;
+          g.beginPath(); g.moveTo(x, y);
+          g.bezierCurveTo(x + (rnd() - .5) * 8, y + len * .33, x + (rnd() - .5) * 8, y + len * .66, x + (rnd() - .5) * 6, y + len);
+          g.stroke();
+        }
+        if (rnd() < 0.35) {                         // knot
+          const kx = i * pw + pw * (0.2 + rnd() * 0.6), ky = y + rnd() * len;
+          g.fillStyle = 'rgba(55,48,42,0.35)';
+          g.beginPath(); g.ellipse(kx, ky, 3 + rnd() * 4, 7 + rnd() * 10, 0, 0, Math.PI * 2); g.fill();
+        }
+        g.fillStyle = 'rgba(40,36,32,0.55)'; g.fillRect(i * pw, y, pw, 2);   // butt joint
+        y += len;
+      }
+      g.fillStyle = 'rgba(40,36,32,0.6)'; g.fillRect(i * pw, 0, 2, h);       // long seam
+    }
+  }
+
+  // Crushed purple textured panels, 2 ft squares. Canvas = 4 ft x 4 ft.
+  function drawPurple(g, w, h) {
+    g.fillStyle = '#33264a'; g.fillRect(0, 0, w, h);
+    for (let i = 0; i < 9000; i++) {
+      const x = rnd() * w, y = rnd() * h, r = 1 + rnd() * 7;
+      const t = rnd();
+      g.fillStyle = t < 0.45 ? 'rgba(92,66,128,0.55)' : t < 0.75 ? 'rgba(150,128,178,0.45)' : t < 0.9 ? 'rgba(18,12,24,0.7)' : 'rgba(200,190,215,0.35)';
+      g.beginPath(); g.ellipse(x, y, r, r * (0.5 + rnd()), rnd() * 3, 0, Math.PI * 2); g.fill();
+    }
+    // panel tint variation + seams
+    for (let a = 0; a < 2; a++) for (let b = 0; b < 2; b++) {
+      g.fillStyle = 'rgba(' + (rnd() < .5 ? '60,30,90' : '20,10,30') + ',' + (0.08 + rnd() * 0.12) + ')';
+      g.fillRect(a * w / 2, b * h / 2, w / 2, h / 2);
+    }
+    g.fillStyle = 'rgba(10,6,14,0.6)';
+    g.fillRect(w / 2 - 1, 0, 2, h); g.fillRect(0, h / 2 - 1, w, 2); g.fillRect(0, 0, 2, h); g.fillRect(0, 0, w, 2);
+  }
+
+  // Rustic charcoal-stained wood for the floating shelves
+  function drawCharcoal(g, w, h) {
+    g.fillStyle = '#4a4846'; g.fillRect(0, 0, w, h);
+    for (let i = 0; i < 260; i++) {
+      const y = rnd() * h;
+      g.strokeStyle = rnd() < .6 ? 'rgba(25,24,23,' + (0.15 + rnd() * .3) + ')' : 'rgba(150,146,140,' + (0.08 + rnd() * .15) + ')';
+      g.lineWidth = 0.5 + rnd() * 2;
+      g.beginPath(); g.moveTo(0, y);
+      for (let x = 0; x <= w; x += 32) g.lineTo(x, y + Math.sin(x * 0.01 + i) * 3 + (rnd() - .5) * 2);
+      g.stroke();
+    }
+  }
+  function drawWalnut(g, w, h) {
+    g.fillStyle = '#5b412f'; g.fillRect(0, 0, w, h);
+    for (let i = 0; i < 220; i++) {
+      const y = rnd() * h;
+      g.strokeStyle = rnd() < .6 ? 'rgba(40,26,18,' + (0.15 + rnd() * .3) + ')' : 'rgba(150,110,80,' + (0.08 + rnd() * .15) + ')';
+      g.lineWidth = 0.5 + rnd() * 2;
+      g.beginPath(); g.moveTo(0, y);
+      for (let x = 0; x <= w; x += 32) g.lineTo(x, y + Math.sin(x * 0.008 + i) * 4);
+      g.stroke();
+    }
+  }
+  // 2x4 lay-in ceiling tile. Canvas = 4 ft x 4 ft (two 2x4 tiles).
+  function drawCeiling(g, w, h) {
+    g.fillStyle = '#f2f1ec'; g.fillRect(0, 0, w, h);
+    for (let i = 0; i < 6000; i++) {
+      g.fillStyle = 'rgba(150,148,140,' + rnd() * 0.25 + ')';
+      g.fillRect(rnd() * w, rnd() * h, 1.2, 1.2);
+    }
+    g.fillStyle = '#d4d3cd';
+    g.fillRect(0, 0, w, 6); g.fillRect(0, 0, 6, h); g.fillRect(w / 2 - 3, 0, 6, h);
+  }
+  function drawSlat(g, w, h) {                       // black slatwall, 4" on center. Canvas = 2 ft tall
+    g.fillStyle = '#1d1d1f'; g.fillRect(0, 0, w, h);
+    const n = 6;
+    for (let i = 0; i < n; i++) {
+      const y = i * h / n;
+      g.fillStyle = '#060607'; g.fillRect(0, y + h / n - 9, w, 7);
+      g.fillStyle = 'rgba(255,255,255,0.09)'; g.fillRect(0, y + h / n - 2, w, 2);
+    }
+  }
+  function drawMat(g, w, h) {
+    g.fillStyle = '#2f8a3c'; g.fillRect(0, 0, w, h);
+    for (let i = 0; i < 5000; i++) { g.fillStyle = 'rgba(0,0,0,' + rnd() * .12 + ')'; g.fillRect(rnd() * w, rnd() * h, 2, 2); }
+    g.strokeStyle = '#1f6a2b'; g.lineWidth = 14; g.strokeRect(10, 10, w - 20, h - 20);
+    g.fillStyle = '#163b1d';
+    g.font = '600 ' + Math.round(h * 0.16) + 'px "Josefin Sans", sans-serif';
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText('PAPER & LEAF', w / 2, h * 0.3);
+    // simple seven-point leaf
+    g.save(); g.translate(w / 2, h * 0.72);
+    const blades = [[0, 1], [-0.45, 0.8], [0.45, 0.8], [-0.95, 0.55], [0.95, 0.55], [-1.3, 0.3], [1.3, 0.3]];
+    blades.forEach(([a, s]) => {
+      g.save(); g.rotate(a * 0.9); g.scale(s, s);
+      g.beginPath(); g.moveTo(0, 0);
+      g.quadraticCurveTo(h * 0.06, -h * 0.17, 0, -h * 0.32);
+      g.quadraticCurveTo(-h * 0.06, -h * 0.17, 0, 0); g.fill(); g.restore();
+    });
+    g.fillRect(-3, 0, 6, h * 0.12);
+    g.restore();
+  }
+
+  const floorTex = canvasTex(1024, 2048, drawFloor, 1 / 7, 1 / 14);
+  const purpleTex = canvasTex(1024, 1024, drawPurple);
+  const charcoalTex = canvasTex(1024, 128, drawCharcoal);
+  const walnutTex = canvasTex(1024, 256, drawWalnut);
+  const ceilTex = canvasTex(512, 512, drawCeiling, 1 / 4, 1 / 4);
+  const slatTex = canvasTex(256, 512, drawSlat);
+  const matTex = canvasTex(768, 512, drawMat);
+
+  // ---------- Materials
+  const M = {
+    floor: new THREE.MeshStandardMaterial({ map: floorTex, roughness: 0.55, metalness: 0, envMapIntensity: 0.6 }),
+    wall: new THREE.MeshStandardMaterial({ color: 0xeeebe3, roughness: 0.92 }),
+    black: new THREE.MeshStandardMaterial({ color: 0x141416, roughness: 0.5 }),
+    blackMatte: new THREE.MeshStandardMaterial({ color: 0x1a1a1c, roughness: 0.85 }),
+    ceiling: new THREE.MeshStandardMaterial({ map: ceilTex, roughness: 1, side: THREE.DoubleSide }),
+    led: new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false }),
+    glass: new THREE.MeshStandardMaterial({ color: 0xdfeff0, transparent: true, opacity: 0.16, roughness: 0.03, metalness: 0.1, envMapIntensity: 1.6, depthWrite: false }),
+    storefront: new THREE.MeshStandardMaterial({ color: 0xbfd4dc, transparent: true, opacity: 0.22, roughness: 0.02, metalness: 0.2, envMapIntensity: 1.4, depthWrite: false }),
+    alum: new THREE.MeshStandardMaterial({ color: 0x2c2a28, roughness: 0.4, metalness: 0.6 }),
+    chrome: new THREE.MeshStandardMaterial({ color: 0xcfd2d4, roughness: 0.2, metalness: 1 }),
+    walnut: new THREE.MeshStandardMaterial({ map: walnutTex, roughness: 0.6 }),
+    mat: new THREE.MeshStandardMaterial({ map: matTex, roughness: 1 }),
+    slat: new THREE.MeshStandardMaterial({ map: slatTex, roughness: 0.6 }),
+    screen: new THREE.MeshStandardMaterial({ color: 0x0a0a0c, roughness: 0.15, metalness: 0.3 }),
+    door: new THREE.MeshStandardMaterial({ color: 0x18171a, roughness: 0.45 }),
+  };
+  function charcoalMat(len) {
+    const t = charcoalTex.clone(); t.needsUpdate = true; t.repeat.set(len / 6, 1);
+    return new THREE.MeshStandardMaterial({ map: t, roughness: 0.75 });
+  }
+  function purpleMat(w, h) {
+    const t = purpleTex.clone(); t.needsUpdate = true; t.repeat.set(w / 4, h / 4);
+    return new THREE.MeshStandardMaterial({ map: t, bumpMap: t, bumpScale: 0.04, roughness: 0.95 });
+  }
+
+  // ---------- Helpers
+  // The plan is drawn looking from the front door; mirror x so plan-left is screen-left. Text gets a second mirror to stay readable.
+  const root = new THREE.Group(); root.scale.x = -1; scene.add(root);
+  function box(w, h, d, mat, x, y, z, parent = root, opts = {}) {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+    m.position.set(x, y, z);
+    m.castShadow = opts.cast !== false; m.receiveShadow = true;
+    parent.add(m); return m;
+  }
+  const interior = new THREE.Vector2(14, 27);
+  function seg(a, b) {
+    const A = new THREE.Vector2(a[0], a[1]), B = new THREE.Vector2(b[0], b[1]);
+    const d = B.clone().sub(A); const L = d.length(); const u = d.clone().divideScalar(L);
+    let n = new THREE.Vector2(-u.y, u.x);
+    const mid = A.clone().add(B).multiplyScalar(0.5);
+    if (interior.clone().sub(mid).dot(n) < 0) n.negate();
+    return { A, B, L, u, n, rotY: Math.atan2(n.x, n.y) };
+  }
+  // Place an object against a wall: s = feet along the wall, y = height, out = feet off the wall face
+  function onWall(S, obj, s, y, out) {
+    const p = S.A.clone().add(S.u.clone().multiplyScalar(s)).add(S.n.clone().multiplyScalar(out));
+    obj.position.set(p.x, y, p.y); obj.rotation.y = S.rotY; root.add(obj); return obj;
+  }
+  function textSign(text, wFt, hFt) {
+    const c = document.createElement('canvas'); c.width = 512; c.height = Math.round(512 * hFt / wFt);
+    const g = c.getContext('2d');
+    g.fillStyle = '#111113'; g.fillRect(0, 0, c.width, c.height);
+    g.fillStyle = '#f4f2ee'; g.textAlign = 'center'; g.textBaseline = 'middle';
+    let fs = c.height * 0.62;
+    g.font = '300 ' + fs + 'px "Josefin Sans", sans-serif';
+    while (g.measureText(text).width > c.width * 0.8) { fs *= 0.92; g.font = '300 ' + fs + 'px "Josefin Sans", sans-serif'; }
+    g.fillText(text, c.width / 2, c.height * 0.56);
+    const t = new THREE.CanvasTexture(c); t.encoding = THREE.sRGBEncoding; t.anisotropy = 8;
+    const grp = new THREE.Group();
+    const back = new THREE.Mesh(new THREE.BoxGeometry(wFt, hFt, 0.08), M.black); back.position.z = 0.04; grp.add(back);
+    const face = new THREE.Mesh(new THREE.PlaneGeometry(wFt, hFt), new THREE.MeshStandardMaterial({ map: t, roughness: 0.4 }));
+    face.position.z = 0.081; face.scale.x = -1; grp.add(face);
+    return grp;
+  }
+
+  // Product palette pulled from the shelves in the photo: loud packaging
+  const pack = [0xc81e14, 0xe09a00, 0x0a78c2, 0x6a1fb0, 0x0e9a4c, 0xd8317e, 0xf2f2f2, 0x1b1b1b, 0xe0650a, 0x0fb39a, 0xb8a882, 0x1a3fb0, 0xf2d21a];
+  const packMats = pack.map(c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.45 }));
+  const bottleMat = new THREE.MeshStandardMaterial({ color: 0x3c2414, roughness: 0.2, metalness: 0.1 });
+  const capMat = new THREE.MeshStandardMaterial({ color: 0x0d0d0d, roughness: 0.4 });
+  const blueBottle = new THREE.MeshStandardMaterial({ color: 0x3a6fd8, roughness: 0.2 });
+  const whiteBottle = new THREE.MeshStandardMaterial({ color: 0xf2f2f2, roughness: 0.3 });
+
+  function productRow(parent, len, depth, y, style) {
+    // fills a strip [-len/2, len/2] at height y with small products
+    let x = -len / 2 + 0.15;
+    while (x < len / 2 - 0.2) {
+      if (style === 'bottles') {
+        const m = rnd() < .5 ? bottleMat : rnd() < .5 ? blueBottle : whiteBottle;
+        const r = 0.07 + rnd() * 0.04, hh = 0.32 + rnd() * 0.2;
+        const b = new THREE.Mesh(new THREE.CylinderGeometry(r, r, hh, 14), m);
+        b.position.set(x, y + hh / 2, (rnd() - .5) * depth * 0.5); b.castShadow = true; parent.add(b);
+        const cap = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.6, r * 0.6, 0.08, 10), capMat);
+        cap.position.set(x, y + hh + 0.04, b.position.z); parent.add(cap);
+        x += r * 2 + 0.12 + rnd() * 0.2;
+      } else if (style === 'cans') {
+        const m = pick(packMats), r = 0.1, hh = 0.4;
+        for (let k = 0; k < 2; k++) {
+          const c = new THREE.Mesh(new THREE.CylinderGeometry(r, r, hh, 16), m);
+          c.position.set(x, y + hh / 2, (k - 0.5) * depth * 0.4); c.castShadow = true; parent.add(c);
+        }
+        x += r * 2 + 0.05;
+      } else {
+        const w = 0.16 + rnd() * 0.24, hh = 0.18 + rnd() * 0.32, d = Math.min(depth * 0.7, 0.15 + rnd() * 0.3);
+        const b = new THREE.Mesh(new THREE.BoxGeometry(w, hh, d), pick(packMats));
+        b.position.set(x + w / 2, y + hh / 2, (rnd() - .5) * (depth - d) * 0.6); b.castShadow = true; parent.add(b);
+        x += w + 0.04 + rnd() * 0.12;
+      }
+    }
+  }
+
+  // ---------- Floor + ceiling
+  const shape = new THREE.Shape();
+  poly.forEach(([x, z], i) => i ? shape.lineTo(x, -z) : shape.moveTo(x, -z));
+  const floor = new THREE.Mesh(new THREE.ShapeGeometry(shape), M.floor);
+  floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; root.add(floor);
+
+  const ceilingGroup = new THREE.Group(); root.add(ceilingGroup);
+  const ceil = new THREE.Mesh(new THREE.ShapeGeometry(shape), M.ceiling);
+  ceil.rotation.x = -Math.PI / 2; ceil.position.y = H; ceilingGroup.add(ceil);
+
+  function inside(x, z) {
+    let c = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const [xi, zi] = poly[i], [xj, zj] = poly[j];
+      if (((zi > z) !== (zj > z)) && (x < (xj - xi) * (z - zi) / (zj - zi) + xi)) c = !c;
+    }
+    return c;
+  }
+  // 2x4 LED flat panels on the tile grid, same as the existing store
+  const ledGeo = new THREE.PlaneGeometry(2, 4);
+  const lightSpots = [];
+  for (let x = 4.5; x <= 16.5; x += 6) for (let z = 5; z <= 53; z += 8) {
+    if (!inside(x - 1.5, z - 2.5) || !inside(x + 1.5, z + 2.5)) continue;
+    const p = new THREE.Mesh(ledGeo, M.led);
+    p.rotation.x = Math.PI / 2; p.position.set(x, H - 0.02, z); ceilingGroup.add(p);
+    const rim = box(2.15, 0.03, 4.15, M.wall, x, H - 0.01, z, ceilingGroup, { cast: false });
+    lightSpots.push([x, z]);
+  }
+
+  // ---------- Lighting
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x6f6a63, 0.42));
+  lightSpots.forEach(([x, z]) => {
+    const l = new THREE.PointLight(0xfff8ee, 0.12, 30, 2);
+    l.position.set(x, H - 0.6, z); root.add(l);
+  });
+  const sun = new THREE.DirectionalLight(0xfffaf2, 0.45);
+  sun.position.set(10.5, 40, 27); sun.target.position.set(10.5, 0, 28);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(2048, 2048);
+  Object.assign(sun.shadow.camera, { left: -30, right: 30, top: 30, bottom: -30, near: 1, far: 80 });
+  sun.shadow.bias = -0.0004; sun.shadow.radius = 4;
+  root.add(sun, sun.target);
+
+  // ---------- Walls with black crown molding and black base, like the photo
+  const T = 0.4;
+  const walls = {
+    back: seg([0, DEPTH], [W, DEPTH]),
+    right: seg([W, DEPTH], [W, 0]),
+    left: seg([0, 8], [0, DEPTH]),
+    leftFront: seg([0, 0], [0, 4]),
+    frontL: seg([0, 0], [1.5, 0]),
+    frontR: seg([19.5, 0], [W, 0]),
+  };
+  Object.entries(walls).forEach(([k, S]) => {
+    const mat = k === 'back' ? purpleMat(S.L, H) : M.wall;
+    const ext = k === 'diagonal' ? 0.4 : 0.25;
+    const g = new THREE.Mesh(new THREE.BoxGeometry(S.L + ext, H, T), mat);
+    onWall(S, g, S.L / 2, H / 2, -T / 2);
+    g.receiveShadow = true;
+    if (k !== 'back') {
+      onWall(S, new THREE.Mesh(new THREE.BoxGeometry(S.L, 0.42, 0.06), M.black), S.L / 2, 0.21, 0.03);
+    } else {
+      onWall(S, new THREE.Mesh(new THREE.BoxGeometry(S.L, 0.42, 0.06), M.black), S.L / 2, 0.21, 0.03);
+    }
+    const crown = new THREE.Mesh(new THREE.BoxGeometry(S.L, 0.38, 0.18), M.black);
+    onWall(S, crown, S.L / 2, H - 0.19, 0.09);
+  });
+
+  // ---------- Storefront: three 6' windows across the front, side entry with a vestibule on the left wall
+  function glassDoor(x, zc) {
+    [-1, 1].forEach(k => box(0.2, 7.3, 0.2, M.alum, x, 3.65, zc + k * 1.75, root, { cast: false }));
+    box(0.2, 0.2, 3.7, M.alum, x, 7.3, zc, root, { cast: false });
+    box(0.2, 0.6, 3.7, M.alum, x, 0.3, zc, root, { cast: false });
+    const gl = new THREE.Mesh(new THREE.PlaneGeometry(3.3, 6.6), M.storefront);
+    gl.rotation.y = Math.PI / 2; gl.position.set(x, 3.9, zc); root.add(gl);
+    [-1, 1].forEach(k => box(0.06, 2.4, 0.06, M.chrome, x + k * 0.25, 3.6, zc - 1.3, root, { cast: false }));
+  }
+  (function storefront() {
+    const x0 = 1.5, x1 = 19.5, top = 8.5;
+    box(x1 - x0, H - top, 0.4, M.wall, (x0 + x1) / 2, top + (H - top) / 2, -0.2, root, { cast: false });
+    box(x1 - x0, 0.38, 0.18, M.black, (x0 + x1) / 2, H - 0.19, 0.09, root, { cast: false });
+    [x0, 7.5, 13.5, x1].forEach(x => box(0.22, top, 0.4, M.alum, x, top / 2, 0, root, { cast: false }));
+    box(x1 - x0, 0.22, 0.4, M.alum, (x0 + x1) / 2, top, 0, root, { cast: false });
+    box(x1 - x0, 0.35, 0.4, M.alum, (x0 + x1) / 2, 0.17, 0, root, { cast: false });
+    const gl = new THREE.Mesh(new THREE.PlaneGeometry(x1 - x0, top), M.storefront);
+    gl.position.set((x0 + x1) / 2, top / 2, 0); root.add(gl);
+    const sign = textSign('PAPER & LEAF CO.', 4.5, 0.7);
+    sign.position.set(10.5, 7.7, 0.06); root.add(sign);
+    // vestibule: 5' deep x 4' wide, starting 4' back from the front glass
+    [4, 8].forEach(z => {
+      box(5, H, 0.3, M.wall, 2.5, H / 2, z, root, { cast: false });
+      box(5, 0.42, 0.36, M.black, 2.5, 0.21, z, root, { cast: false });
+      box(5, 0.38, 0.5, M.black, 2.5, H - 0.19, z, root, { cast: false });
+    });
+    box(0.3, H - 7.45, 4, M.wall, 5, 7.45 + (H - 7.45) / 2, 6, root, { cast: false });     // header over inner door
+    box(0.4, H - 7.45, 4, M.wall, -0.2, 7.45 + (H - 7.45) / 2, 6, root, { cast: false });  // header over street door
+    glassDoor(5, 6);
+    glassDoor(0, 6);
+  })();
+
+  // ---------- Back (new) wall: door to back of house + brand sign on the purple
+  (function backWall() {
+    const S = walls.back;
+    const door = new THREE.Mesh(new THREE.BoxGeometry(3.1, 7, 0.15), M.door);
+    onWall(S, door, 17.8, 3.5, 0.06);
+    const frame = new THREE.Mesh(new THREE.BoxGeometry(3.5, 7.25, 0.08), M.black);
+    onWall(S, frame, 17.8, 3.6, 0.03);
+    const lever = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.06, 0.1), M.chrome);
+    onWall(S, lever, 16.6, 3.4, 0.2);
+    // wordmark in white on the purple
+    const c = document.createElement('canvas'); c.width = 2048; c.height = 400;
+    const g = c.getContext('2d');
+    g.fillStyle = '#ffffff'; g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.font = '300 220px "Josefin Sans", sans-serif';
+    g.fillText('PAPER & LEAF CO.', c.width / 2, 220);
+    const t = new THREE.CanvasTexture(c); t.encoding = THREE.sRGBEncoding;
+    const mark = new THREE.Mesh(new THREE.PlaneGeometry(16, 3.1), new THREE.MeshBasicMaterial({ map: t, transparent: true, toneMapped: false }));
+    mark.scale.x = -1; mark.scale.y = 0.7; mark.scale.x = -0.7; onWall(S, mark, 7.6, 6.5, 0.06);
+  })();
+
+  // ---------- Floating charcoal shelves with black category signs (photo right wall)
+  function shelfBay(S, s, label, styleList, len = 4.5) {
+    const sign = textSign(label, label.length > 6 ? 4.4 : label.length > 4 ? 3.2 : 2.6, 1.15);
+    onWall(S, sign, s, 7.9, 0.02);
+    const heights = [5.9, 4.6, 3.3];
+    heights.forEach((y, i) => {
+      const shelf = new THREE.Mesh(new THREE.BoxGeometry(len, 0.45, 0.95), charcoalMat(len));
+      shelf.castShadow = true; shelf.receiveShadow = true;
+      onWall(S, shelf, s, y, 0.48);
+      const holder = new THREE.Group();
+      productRow(holder, len - 0.3, 0.8, 0.225, styleList[i % styleList.length]);
+      onWall(S, holder, s, y, 0.5);
+    });
+  }
+  // Left wall, front to back (s = feet back from the vestibule)
+  shelfBay(walls.left, 4.5, 'ROLLING', ['boxes']);
+  shelfBay(walls.left, 11, 'CBD', ['bottles', 'boxes']);
+  shelfBay(walls.left, 17.5, 'PET', ['bottles', 'boxes']);
+  shelfBay(walls.left, 24, 'SPA', ['bottles', 'boxes']);
+  shelfBay(walls.left, 31, 'BEVERAGES', ['cans']);
+  shelfBay(walls.left, 39.5, 'GUMMIES', ['boxes'], 6);
+
+  // ---------- Black slatwall behind the counter run on the right wall
+  (function slatwall() {
+    const S = walls.right;
+    const s0 = 22, len = 21, h = 6.2, mid = s0 + len / 2;
+    const t = slatTex.clone(); t.needsUpdate = true; t.repeat.set(len / 2, h / 2);
+    const panel = new THREE.Mesh(new THREE.BoxGeometry(len, h, 0.1), new THREE.MeshStandardMaterial({ map: t, roughness: 0.6 }));
+    onWall(S, panel, mid, 2.4 + h / 2, 0.05);
+    const frame = new THREE.Mesh(new THREE.BoxGeometry(len + 0.15, h + 0.15, 0.06), M.black);
+    onWall(S, frame, mid, 2.4 + h / 2, 0.03);
+    // hanging carded product on hooks, a couple of glass shelves
+    for (let r = 0; r < 5; r++) {
+      const y = 3.2 + r * 1.15;
+      for (let s = s0 + 0.6; s < s0 + len - 0.4; s += 0.75 + rnd() * 0.4) {
+        if (rnd() < 0.18) continue;
+        const card = new THREE.Mesh(new THREE.BoxGeometry(0.35 + rnd() * 0.15, 0.5 + rnd() * 0.2, 0.1), pick(packMats));
+        card.castShadow = true;
+        onWall(S, card, s, y - 0.3, 0.35);
+        const hook = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.35, 6), M.chrome);
+        hook.rotation.x = Math.PI / 2;
+        const hg = new THREE.Group(); hg.add(hook); onWall(S, hg, s, y, 0.2);
+      }
+    }
+    // small tilted trays along the top like the photo
+    for (let s = s0 + 1; s < s0 + len - 0.5; s += 2.2) {
+      const tray = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.5, 0.05), pick(packMats));
+      const grp = new THREE.Group(); tray.rotation.x = -0.25; grp.add(tray);
+      onWall(S, grp, s, 9.0, 0.2);
+    }
+  })();
+
+  // ---------- Three 55" TVs, portrait, clustered at the front end of the right wall
+  (function tvWall() {
+    const S = walls.right;
+    const menus = [
+      ['CANNABINOIDS', ['Delta-8 THC', 'Delta-9 THC', 'THCA', 'CBD · CBN · CBG']],
+      ['SPECIALS', ['Daily deal', 'Bundle & save', 'Punch card bonus', 'New arrivals']],
+      ['ADVOCACY', ['Know your rights', 'Contact your reps', 'Local events', 'Get involved']],
+    ];
+    const bezelM = new THREE.MeshStandardMaterial({ color: 0x0b0b0c, roughness: 0.35, metalness: 0.2 });
+    [39.82, 37.16, 34.5].forEach((z, i) => {   // tight cluster, 0.3' gaps, behind the back of the counter run
+      const c = document.createElement('canvas'); c.width = 540; c.height = 960;
+      const g = c.getContext('2d');
+      const grd = g.createLinearGradient(0, 0, 0, c.height); grd.addColorStop(0, '#2b1f3d'); grd.addColorStop(1, '#120d1a');
+      g.fillStyle = grd; g.fillRect(0, 0, c.width, c.height);
+      g.fillStyle = '#46a051'; g.fillRect(0, 0, c.width, 14);
+      g.textAlign = 'center'; g.fillStyle = '#b9b2c4';
+      g.font = '300 34px "Josefin Sans", sans-serif'; g.fillText('PAPER & LEAF CO.', c.width / 2, 80);
+      g.fillStyle = '#ffffff';
+      let fs = 86; g.font = '400 ' + fs + 'px "Josefin Sans", sans-serif';
+      while (g.measureText(menus[i][0]).width > c.width * 0.86) { fs -= 4; g.font = '400 ' + fs + 'px "Josefin Sans", sans-serif'; }
+      g.fillText(menus[i][0], c.width / 2, 200);
+      g.textAlign = 'left';
+      menus[i][1].forEach((item, k) => {
+        const y = 320 + k * 150;
+        g.fillStyle = 'rgba(255,255,255,0.06)'; g.fillRect(40, y - 60, c.width - 80, 110);
+        g.fillStyle = '#f3f0ea'; g.font = '300 38px "Josefin Sans", sans-serif'; g.fillText(item, 70, y + 8);
+        g.fillStyle = '#46a051'; g.fillRect(c.width - 150, y - 22, 80, 40);
+      });
+      const t = new THREE.CanvasTexture(c); t.encoding = THREE.sRGBEncoding; t.anisotropy = 8;
+      const tvG = new THREE.Group();
+      const bezel = new THREE.Mesh(new THREE.BoxGeometry(2.36, 4.06, 0.12), bezelM); bezel.position.z = 0.1; bezel.castShadow = true; tvG.add(bezel);
+      const screen = new THREE.Mesh(new THREE.PlaneGeometry(2.24, 3.94), new THREE.MeshBasicMaterial({ map: t, toneMapped: false }));
+      screen.position.z = 0.161; screen.scale.x = -1; tvG.add(screen);
+      const mount = new THREE.Mesh(new THREE.BoxGeometry(1.2, 1.2, 0.05), M.black); mount.position.z = 0.025; tvG.add(mount);
+      onWall(S, tvG, DEPTH - z, 6.1, 0);
+    });
+  })();
+
+  // ---------- Wire grid rack mounted on the right wall in the back corner
+  (function wireRack() {
+    const g = new THREE.Group();
+    const rw = 5.2, rh = 6;
+    for (let i = 0; i <= 15; i++) { const v = box(0.03, rh, 0.03, M.black, -rw / 2 + i * rw / 15, 0.5 + rh / 2, 0, g, { cast: false }); }
+    for (let j = 0; j <= 17; j++) { const h = box(rw, 0.03, 0.03, M.black, 0, 0.5 + j * rh / 17, 0, g, { cast: false }); }
+    [-rw / 2, rw / 2].forEach(x => [1.2, 5.8].forEach(y => box(0.08, 0.08, 0.2, M.black, x, y, -0.1, g, { cast: false })));   // wall standoffs
+    onWall(walls.right, g, 4.8, 1.9, 0.2);
+    const tees = [0xd6d2c8, 0x9aa1a6, 0x3c3a3e, 0x4b6b45, 0x5a3f78, 0xc9b98f];
+    tees.forEach((c, k) => {
+      const shirt = box(0.9, 1.1, 0.05, new THREE.MeshStandardMaterial({ color: c, roughness: 0.95 }), -1.6 + (k % 3) * 1.6, k < 3 ? 5.2 : 3.2, 0.1, g);
+      box(0.04, 0.04, 0.3, M.chrome, -1.6 + (k % 3) * 1.6, (k < 3 ? 5.2 : 3.2) + 0.6, 0.15, g, { cast: false });
+    });
+  })();
+
+  // ---------- Glass showcases D1–D5 + 4' return (plan purple), black base like the photo
+  function showcase(x0, x1, z0, z1, label) {
+    const w = x1 - x0, d = z1 - z0, cx = (x0 + x1) / 2, cz = (z0 + z1) / 2;
+    const g = new THREE.Group(); g.position.set(cx, 0, cz); root.add(g);
+    const baseH = 1.1, topH = 3.3;
+    box(w, baseH, d, M.black, 0, baseH / 2, 0, g);
+    box(w - 0.05, 0.03, d - 0.05, M.glass, 0, 2.2, 0, g, { cast: false });           // mid shelf
+    // glass shell
+    const shellH = topH - baseH;
+    const shell = new THREE.Mesh(new THREE.BoxGeometry(w, shellH, d), M.glass);
+    shell.position.y = baseH + shellH / 2; g.add(shell);
+    // black corner posts + top trim
+    [[-1, -1], [1, -1], [-1, 1], [1, 1]].forEach(([sx, sz]) => box(0.07, shellH, 0.07, M.black, sx * (w / 2 - 0.035), baseH + shellH / 2, sz * (d / 2 - 0.035), g, { cast: false }));
+    // product inside on deck and mid shelf
+    const long = d > w;
+    const holder1 = new THREE.Group(), holder2 = new THREE.Group();
+    productRow(holder1, Math.max(w, d) - 0.4, Math.min(w, d) - 0.3, baseH, 'boxes');
+    productRow(holder2, Math.max(w, d) - 0.4, Math.min(w, d) - 0.3, 2.22, 'boxes');
+    holder2.children.forEach(m => m.scale.y = 0.6), holder2.children.forEach(m => m.position.y = 2.22 + (m.position.y - 2.22) * 0.6);
+    [holder1, holder2].forEach(h => { if (long) h.rotation.y = Math.PI / 2; g.add(h); });
+    // little LED strip glow on top edge, like lit cases
+    return g;
+  }
+  const cx0 = 15, cx1 = 17;                  // 2' deep cases, 4' staff aisle behind
+  showcase(cx0, cx1, 33, 39, 'D4');          // 6' cases
+  showcase(cx0, cx1, 27, 33, 'D3');
+  showcase(cx0, cx1, 21, 27, 'D2');
+
+  // ---------- Box counters: walnut top, black base (photo foreground left)
+  function boxCounter(x0, x1, z0, z1, withPOS) {
+    const w = x1 - x0, d = z1 - z0;
+    const g = new THREE.Group(); g.position.set((x0 + x1) / 2, 0, (z0 + z1) / 2); root.add(g);
+    box(w, 3.0, d, M.blackMatte, 0, 1.5, 0, g);
+    const topM = M.walnut.clone(); topM.map = walnutTex.clone(); topM.map.needsUpdate = true; topM.map.repeat.set(Math.max(w, d) / 5, 1);
+    if (d > w) topM.map.rotation = Math.PI / 2;
+    box(w + 0.25, 0.15, d + 0.25, topM, 0, 3.07, 0, g);
+    const imp = new THREE.Group(); imp.position.y = 3.15; if (d > w) imp.rotation.y = Math.PI / 2; g.add(imp);
+    productRow(imp, Math.max(w, d) * 0.4, 0.9, 0, 'boxes');
+    imp.children.forEach(m => { m.scale.set(0.8, 0.6, 0.8); m.position.y *= 0.6; });
+    if (!withPOS) return g;
+    imp.position.set(-1.6, 3.15, -0.2);
+    return checkoutPOS(g);
+  }
+  boxCounter(cx0, cx1, 12, 18, false);       // box counter by the front
+  boxCounter(cx0, 18.5, 39, 41, false);      // rear counter, parallel to the storefront, capping the case run
+  boxCounter(cx0, 20.8, 10, 12, true);       // front checkout
+  function checkoutPOS(g) {
+    // POS stand
+    const stand = new THREE.Group(); stand.position.set(1.8, 3.15, 0.1); g.add(stand);
+    box(0.5, 0.05, 0.4, M.chrome, 0, 0.03, 0, stand, { cast: false });
+    const tab = box(1.0, 0.7, 0.06, M.screen, 0, 0.55, 0, stand); tab.rotation.x = -0.35;
+    const bezel = box(1.06, 0.76, 0.04, new THREE.MeshStandardMaterial({ color: 0xe9e9e9, roughness: 0.4 }), 0, 0.55, 0.02, stand); bezel.rotation.x = -0.35;
+    return g;
+  }
+
+  // ---------- Money tree in the front-right corner: braided trunk, palmate leaf clusters, matte black pot
+  (function moneyTree() {
+    const g = new THREE.Group(); g.position.set(19.7, 0, 1.8); root.add(g);
+    const pot = new THREE.Mesh(new THREE.CylinderGeometry(0.85, 0.62, 1.5, 28), new THREE.MeshStandardMaterial({ color: 0x232325, roughness: 0.75 }));
+    pot.position.y = 0.75; pot.castShadow = true; pot.receiveShadow = true; g.add(pot);
+    const soil = new THREE.Mesh(new THREE.CylinderGeometry(0.8, 0.8, 0.04, 24), new THREE.MeshStandardMaterial({ color: 0x3a2c22, roughness: 1 }));
+    soil.position.y = 1.43; g.add(soil);
+    const barkM = new THREE.MeshStandardMaterial({ color: 0x7c6650, roughness: 0.85 });
+    const top = 3.9;
+    for (let k = 0; k < 5; k++) {
+      const pts = [];
+      for (let i = 0; i <= 24; i++) {
+        const t = i / 24, a = t * Math.PI * 3.2 + k * Math.PI * 2 / 5, r = 0.09 * (1 - t * 0.35);
+        pts.push(new THREE.Vector3(Math.cos(a) * r, 1.43 + t * (top - 1.43), Math.sin(a) * r));
+      }
+      const strand = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 48, 0.045, 8), barkM);
+      strand.castShadow = true; g.add(strand);
+    }
+    const leafM = new THREE.MeshStandardMaterial({ color: 0x3e7a34, roughness: 0.55, side: THREE.DoubleSide });
+    const leafM2 = new THREE.MeshStandardMaterial({ color: 0x4f8f3e, roughness: 0.55, side: THREE.DoubleSide });
+    const stemM = new THREE.MeshStandardMaterial({ color: 0x5d7a3a, roughness: 0.7 });
+    const leafGeo = new THREE.SphereGeometry(1, 10, 6);
+    const up = new THREE.Vector3(0, 1, 0);
+    const crown = new THREE.Vector3(0, 4.5, 0);
+    for (let c = 0; c < 160; c++) {
+      const az = rnd() * Math.PI * 2;
+      const v = new THREE.Vector3(rnd() * 2 - 1, (rnd() * 2 - 1) * 0.85, rnd() * 2 - 1);
+      if (v.lengthSq() > 1 || v.lengthSq() < 0.05) { c--; continue; }
+      const end = v.normalize().multiplyScalar(0.45 + Math.cbrt(rnd()) * 1.25).add(crown);
+      if (end.y < 2.6) end.y = 2.6 + rnd() * 0.4;
+      const start = new THREE.Vector3(0, Math.min(end.y - 0.35, top), 0);
+      const dir = end.clone().sub(start), L = dir.length();
+      const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.02, L, 5), stemM);
+      stem.position.copy(start).add(end).multiplyScalar(0.5);
+      stem.quaternion.setFromUnitVectors(up, dir.normalize()); g.add(stem);
+      const cl = new THREE.Group(); cl.position.copy(end); cl.rotation.set(-0.7 + rnd() * 1.0, Math.atan2(end.x, end.z) + (rnd() - 0.5) * 0.8, (rnd() - 0.5) * 0.7, 'YXZ'); g.add(cl);
+      for (let f = 0; f < 7; f++) {
+        const a = (f - 3) * 0.5 + (rnd() - 0.5) * 0.15;
+        const len = [0.3, 0.4, 0.48, 0.54, 0.48, 0.4, 0.3][f] * (0.85 + rnd() * 0.3);
+        const l = new THREE.Mesh(leafGeo, rnd() < 0.5 ? leafM : leafM2);
+        l.scale.set(0.15, 0.015, len);
+        l.position.set(Math.sin(a) * len, -0.03 * Math.abs(f - 3), Math.cos(a) * len);
+        l.rotation.y = a; l.castShadow = true; cl.add(l);
+      }
+    }
+  })();
+
+  // ---------- Tables T1–T3: walnut tops on black bases with merch (photo center table)
+  [20, 30.5, 41].forEach((z0, i) => {
+    const w = 2, d = 7.9, g = new THREE.Group(); g.position.set(8, 0, z0 + d / 2); root.add(g);
+    const topM = M.walnut.clone(); topM.map = walnutTex.clone(); topM.map.needsUpdate = true; topM.map.repeat.set(1.3, 0.5);
+    box(w + 0.25, 0.14, d + 0.25, topM, 0, 2.85, 0, g);
+    // black iron pipe legs with floor flanges and a low stretcher frame
+    const lx = w / 2 - 0.25, lz = d / 2 - 0.4;
+    [[-1, -1], [1, -1], [-1, 1], [1, 1]].forEach(([sx, sz]) => {
+      const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 2.78, 14), M.alum);
+      leg.position.set(sx * lx, 1.39, sz * lz); leg.castShadow = true; g.add(leg);
+      [0.03, 2.75].forEach(y => { const f = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, 0.06, 16), M.alum); f.position.set(sx * lx, y, sz * lz); g.add(f); });
+    });
+    [-1, 1].forEach(sx => { const r = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.055, 2 * lz, 12), M.alum); r.rotation.x = Math.PI / 2; r.position.set(sx * lx, 0.7, 0); r.castShadow = true; g.add(r); });
+    [-1, 1].forEach(sz => { const c = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.055, 2 * lx, 12), M.alum); c.rotation.z = Math.PI / 2; c.position.set(0, 0.7, sz * lz); g.add(c); });
+    const holder = new THREE.Group(); holder.rotation.y = Math.PI / 2; holder.position.y = 2.92; g.add(holder);
+    productRow(holder, d - 0.3, w - 0.2, 0, i === 1 ? 'bottles' : 'boxes');
+    // a couple of rolling trays laid flat
+    for (let k = 0; k < 2; k++) box(0.9, 0.04, 0.65, pick(packMats), (k - 0.5) * 0.9, 2.94, -d / 2 + 0.6, g);
+  });
+
+  // ---------- Green logo mats (entry + at the cases)
+  function mat(x, z, w, d, rot = 0) {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, 0.04, d), [M.black, M.black, M.mat, M.black, M.black, M.black]);
+    m.position.set(x, 0.02, z); m.rotation.y = rot; m.scale.x = -1; m.receiveShadow = true; root.add(m);
+  }
+  mat(2.5, 6, 3.4, 4.6, Math.PI / 2);       // vestibule
+  mat(7.6, 6, 3.4, 4.8, Math.PI / 2);       // inside the inner door
+  mat(12.6, 24, 4.8, 3.2, Math.PI / 2);
+  mat(12.6, 36, 4.8, 3.2, Math.PI / 2);
+
+  // ---------- Exterior: sidewalk + sky so the storefront doesn't read as a void
+  const walk = new THREE.Mesh(new THREE.PlaneGeometry(60, 16), new THREE.MeshStandardMaterial({ color: 0xbdbab2, roughness: 1 }));
+  walk.rotation.x = -Math.PI / 2; walk.position.set(10.5, -0.02, -8.2); root.add(walk);
+  const canopy = new THREE.Mesh(new THREE.BoxGeometry(24, 0.6, 8), new THREE.MeshStandardMaterial({ color: 0x8a8580, roughness: 0.9 }));
+  canopy.position.set(10.5, 11.2, -4); canopy.castShadow = false; root.add(canopy); ceilingGroup.userData.canopy = canopy;
+
+  // Tame the room reflections so blacks stay black and packaging keeps its color
+  root.traverse(o => {
+    if (!o.isMesh) return;
+    (Array.isArray(o.material) ? o.material : [o.material]).forEach(m => {
+      if (!m || !m.isMeshStandardMaterial) return;
+      if (m === M.glass || m === M.storefront) return;
+      m.envMapIntensity = m === M.chrome ? 0.8 : m === M.floor ? 0.25 : 0.18;
+    });
+  });
+
+  // ---------- Camera views
+  const views = {
+    entrance: { pos: [7.2, 5.4, 6.2], tgt: [11.5, 3.6, 46] },
+    counter: { pos: [19.8, 5.4, 4.5], tgt: [9, 3.4, 44] },
+    back: { pos: [3, 5.5, 53.2], tgt: [14, 3.2, 6] },
+    dollhouse: { pos: [10.5, 46, -4], tgt: [10.5, 0, 28] },
+  };
+  let anim = null;
+  function goTo(name, instant) {
+    const v = views[name];
+    const to = { pos: new THREE.Vector3(-v.pos[0], v.pos[1], v.pos[2]), tgt: new THREE.Vector3(-v.tgt[0], v.tgt[1], v.tgt[2]) };
+    if (instant) { camera.position.copy(to.pos); controls.target.copy(to.tgt); controls.update(); return; }
+    anim = { from: { pos: camera.position.clone(), tgt: controls.target.clone() }, to, t: 0 };
+    document.querySelectorAll('#views button').forEach(b => b.setAttribute('aria-pressed', b.dataset.view === name));
+    try { location.hash = name; } catch (e) {}
+  }
+  document.getElementById('views').addEventListener('click', e => { const b = e.target.closest('button'); if (b) goTo(b.dataset.view); });
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let start = (location.hash || '').slice(1);
+  if (!views[start]) start = 'entrance';
+  goTo(start, true);
+  document.querySelectorAll('#views button').forEach(b => b.setAttribute('aria-pressed', b.dataset.view === start));
+
+  // ---------- Loop
+  function onResize() {
+    camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  }
+  window.addEventListener('resize', onResize);
+  const clock = new THREE.Clock();
+  function tick() {
+    const dt = clock.getDelta();
+    if (anim) {
+      anim.t = reduce ? 1 : Math.min(1, anim.t + dt / 1.1);
+      const e = anim.t < .5 ? 4 * anim.t ** 3 : 1 - (-2 * anim.t + 2) ** 3 / 2;
+      camera.position.lerpVectors(anim.from.pos, anim.to.pos, e);
+      controls.target.lerpVectors(anim.from.tgt, anim.to.tgt, e);
+      if (anim.t >= 1) anim = null;
+    }
+    controls.update();
+    ceilingGroup.visible = camera.position.y < H - 0.1;
+    canopy.visible = ceilingGroup.visible;
+    renderer.render(scene, camera);
+    requestAnimationFrame(tick);
+  }
+  document.getElementById('loading').remove();
+  tick();
+  window.__goTo = goTo;
+})().catch(err => {
+  const l = document.getElementById('loading');
+  if (l) l.textContent = 'The 3D view could not start: ' + err.message;
+});
+</script>
+</body>
+</html>
